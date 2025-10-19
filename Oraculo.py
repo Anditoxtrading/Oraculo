@@ -198,8 +198,7 @@ class ShockDashboard:
         self.actualizando = True
         self.precio_anterior = {}   # Para detectar cruces
         self.hilos_monitores = {}   # {symbol: thread} - un hilo por moneda
-        self.animando = False       # Flag para evitar animaciones simultáneas
-        self.cola_reordenamiento = []  # Cola de reordenamientos pendientes
+        self.animaciones_activas = {}  # {key: animation_id}
         
         # Crear interfaz
         self.crear_interfaz()
@@ -259,17 +258,17 @@ class ShockDashboard:
         long_scroll_frame = tk.Frame(long_frame, bg="#1a1a2e")
         long_scroll_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         
-        long_canvas = tk.Canvas(long_scroll_frame, bg="#1a1a2e", highlightthickness=0)
-        long_scrollbar = ttk.Scrollbar(long_scroll_frame, orient="vertical", command=long_canvas.yview)
-        self.long_container = tk.Frame(long_canvas, bg="#1a1a2e")
+        self.long_canvas = tk.Canvas(long_scroll_frame, bg="#1a1a2e", highlightthickness=0)
+        long_scrollbar = ttk.Scrollbar(long_scroll_frame, orient="vertical", command=self.long_canvas.yview)
+        self.long_container = tk.Frame(self.long_canvas, bg="#1a1a2e")
         
         self.long_container.bind("<Configure>", 
-                                lambda e: long_canvas.configure(scrollregion=long_canvas.bbox("all")))
+                                lambda e: self.long_canvas.configure(scrollregion=self.long_canvas.bbox("all")))
         
-        long_canvas.create_window((0, 0), window=self.long_container, anchor="nw")
-        long_canvas.configure(yscrollcommand=long_scrollbar.set)
+        self.long_canvas.create_window((0, 0), window=self.long_container, anchor="nw")
+        self.long_canvas.configure(yscrollcommand=long_scrollbar.set)
         
-        long_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.long_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         long_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
         # Columna SHORT (Rojo)
@@ -286,58 +285,50 @@ class ShockDashboard:
         short_scroll_frame = tk.Frame(short_frame, bg="#1a1a2e")
         short_scroll_frame.pack(fill=tk.BOTH, expand=True, pady=5)
         
-        short_canvas = tk.Canvas(short_scroll_frame, bg="#1a1a2e", highlightthickness=0)
-        short_scrollbar = ttk.Scrollbar(short_scroll_frame, orient="vertical", command=short_canvas.yview)
-        self.short_container = tk.Frame(short_canvas, bg="#1a1a2e")
+        self.short_canvas = tk.Canvas(short_scroll_frame, bg="#1a1a2e", highlightthickness=0)
+        short_scrollbar = ttk.Scrollbar(short_scroll_frame, orient="vertical", command=self.short_canvas.yview)
+        self.short_container = tk.Frame(self.short_canvas, bg="#1a1a2e")
         
         self.short_container.bind("<Configure>", 
-                                 lambda e: short_canvas.configure(scrollregion=short_canvas.bbox("all")))
+                                 lambda e: self.short_canvas.configure(scrollregion=self.short_canvas.bbox("all")))
         
-        short_canvas.create_window((0, 0), window=self.short_container, anchor="nw")
-        short_canvas.configure(yscrollcommand=short_scrollbar.set)
+        self.short_canvas.create_window((0, 0), window=self.short_container, anchor="nw")
+        self.short_canvas.configure(yscrollcommand=short_scrollbar.set)
         
-        short_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.short_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         short_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
     
     def crear_tarjeta_shock(self, container, data, tipo):
         symbol = data['symbol']
         key = f"{symbol}_{tipo}"
         
-        # Frame principal de la tarjeta con efecto de aparición
         card = tk.Frame(container, bg="#16213e", relief=tk.RAISED, bd=2)
         card.pack(fill=tk.X, padx=10, pady=8)
         
         color = "#00ff88" if tipo == "LONG" else "#ff4444"
         
-        # TODO EN UNA LÍNEA
         info_frame = tk.Frame(card, bg="#16213e")
         info_frame.pack(fill=tk.X, padx=20, pady=15)
         
         formato = f".{data['decimales']}f"
         
-        # Moneda
         tk.Label(info_frame, text="Moneda:", 
                 font=("Segoe UI", 9, "bold"),
                 bg="#16213e", fg="#888888").pack(side=tk.LEFT, padx=(0, 5))
         
-        # Label simple para símbolo (más rápido que Entry)
         symbol_label = tk.Label(info_frame, text=symbol,
                                font=("Segoe UI", 11, "bold"),
                                bg="#16213e", fg=color,
                                cursor="hand2")
         symbol_label.pack(side=tk.LEFT, padx=(0, 20))
-        
-        # Copiar al hacer click
         symbol_label.bind("<Button-1>", lambda e: self.copiar_al_portapapeles(symbol))
         
-        # Shock (Entrada)
         tk.Label(info_frame, text="Shock:", 
                 font=("Segoe UI", 9, "bold"),
                 bg="#16213e", fg="#888888").pack(side=tk.LEFT, padx=(0, 5))
         
-        # Label para precio de entrada
         entrada_str = f"${data['entrada']:{formato}}"
-        entrada_valor = f"{data['entrada']:{formato}}"  # Sin el símbolo $
+        entrada_valor = f"{data['entrada']:{formato}}"
         entrada_label = tk.Label(info_frame, text=entrada_str,
                                 font=("Courier New", 10, "bold"),
                                 bg="#16213e", fg=color,
@@ -345,14 +336,12 @@ class ShockDashboard:
         entrada_label.pack(side=tk.LEFT, padx=(0, 20))
         entrada_label.bind("<Button-1>", lambda e: self.copiar_al_portapapeles(entrada_valor))
         
-        # Stop Loss
         tk.Label(info_frame, text="Stop:", 
                 font=("Segoe UI", 9, "bold"),
                 bg="#16213e", fg="#888888").pack(side=tk.LEFT, padx=(0, 5))
         
-        # Label para stop loss
         stop_str = f"${data['stop_loss']:{formato}}"
-        stop_valor = f"{data['stop_loss']:{formato}}"  # Sin el símbolo $
+        stop_valor = f"{data['stop_loss']:{formato}}"
         stop_label = tk.Label(info_frame, text=stop_str,
                              font=("Courier New", 10, "bold"),
                              bg="#16213e", fg="#ffa500",
@@ -360,18 +349,15 @@ class ShockDashboard:
         stop_label.pack(side=tk.LEFT, padx=(0, 5))
         stop_label.bind("<Button-1>", lambda e: self.copiar_al_portapapeles(stop_valor))
         
-        # Calcular distancia FIJA entre entrada y stop loss (solo una vez)
         entrada = data['entrada']
         stop_loss = data['stop_loss']
         distancia_entrada_stop_pct = abs((stop_loss - entrada) / entrada * 100)
         
-        # Label para distancia fija entrada-stop (en negrita, sin paréntesis)
         stop_dist_label = tk.Label(info_frame, text=f"{distancia_entrada_stop_pct:.2f}%",
                                    font=("Courier New", 10, "bold"),
                                    bg="#16213e", fg="#ff6b6b")
         stop_dist_label.pack(side=tk.LEFT, padx=(0, 20))
         
-        # Distancia (se actualizará en tiempo real)
         tk.Label(info_frame, text="Dist:", 
                 font=("Segoe UI", 9, "bold"),
                 bg="#16213e", fg="#888888").pack(side=tk.LEFT, padx=(0, 5))
@@ -381,13 +367,9 @@ class ShockDashboard:
                              bg="#16213e", fg="#00ccff")
         dist_label.pack(side=tk.LEFT)
         
-        # Guardar referencia para actualización en tiempo real
         self.tarjetas_activas[key] = {
             'frame': card,
             'dist_label': dist_label,
-            'symbol_label': symbol_label,
-            'entrada_label': entrada_label,
-            'stop_label': stop_label,
             'data': data,
             'color': color
         }
@@ -395,14 +377,11 @@ class ShockDashboard:
         return card
     
     def copiar_al_portapapeles(self, texto):
-        """Copia texto al portapapeles"""
         self.root.clipboard_clear()
         self.root.clipboard_append(texto)
-        # Feedback visual rápido
         self.actualizar_status(f"📋 Copiado: {texto}")
     
     def escaneo_inicial(self):
-        """Escaneo inicial para obtener todos los shocks (solo una vez al iniciar)"""
         def escanear():
             print("🔍 Realizando escaneo inicial de order books...")
             self.actualizar_status("🔍 Escaneando...")
@@ -413,7 +392,6 @@ class ShockDashboard:
                 self.root.after(10000, self.escaneo_inicial)
                 return
             
-            # Cargar tick sizes
             for sym in symbols:
                 if sym not in self.tick_sizes:
                     self.tick_sizes[sym] = obtener_tick_size(sym)
@@ -423,14 +401,12 @@ class ShockDashboard:
                         self.agrupaciones[sym] = agrupacion_optima
                         guardar_agrupaciones(self.agrupaciones)
             
-            # Obtener TODOS los libros de órdenes (solo en el escaneo inicial)
             order_books = cargar_libro_ordenes_api(symbols, self.base_url)
             if not order_books:
                 print("❌ No hay datos de libros de órdenes")
                 self.root.after(10000, self.escaneo_inicial)
                 return
             
-            # Procesar datos y guardar shocks
             resultados_long = []
             resultados_short = []
             
@@ -452,7 +428,6 @@ class ShockDashboard:
                 shocks_long, shocks_short, decimales_tick = calcular_shocks(
                     order_book, agrupacion, tick)
                 
-                # Guardar shocks para monitoreo
                 if symbol not in self.shocks_activos:
                     self.shocks_activos[symbol] = {}
                 
@@ -500,23 +475,19 @@ class ShockDashboard:
                         'tick_size': tick
                     })
             
-            # Ordenar por distancia
             resultados_long.sort(key=lambda x: x['distancia_pct'])
             resultados_short.sort(key=lambda x: x['distancia_pct'])
             
             print(f"✅ Escaneo inicial completado: {len(resultados_long)} LONGs, {len(resultados_short)} SHORTs")
             
-            # Actualizar UI
             self.root.after(0, lambda: self.actualizar_ui(resultados_long, resultados_short))
             self.actualizar_status("🟢 Monitoreando")
             
-            # Iniciar un hilo para cada moneda
             self.root.after(0, self.iniciar_hilos_monitores)
         
         threading.Thread(target=escanear, daemon=True).start()
     
     def iniciar_hilos_monitores(self):
-        """Inicia un hilo de monitoreo para cada moneda"""
         for symbol in self.shocks_activos.keys():
             if symbol not in self.hilos_monitores:
                 hilo = threading.Thread(target=self.monitorear_moneda, args=(symbol,), daemon=True)
@@ -525,12 +496,10 @@ class ShockDashboard:
                 print(f"🔍 Hilo de monitoreo iniciado para {symbol}")
     
     def monitorear_moneda(self, symbol):
-        """Monitorea una moneda específica en su propio hilo"""
         print(f"▶️ Iniciando monitoreo de {symbol}")
         
         while self.actualizando:
             try:
-                # Obtener precio actual
                 precio_actual = obtener_precio_actual(symbol)
                 
                 if precio_actual is None:
@@ -540,42 +509,35 @@ class ShockDashboard:
                 precio_prev = self.precio_anterior.get(symbol, precio_actual)
                 self.precios_actuales[symbol] = precio_actual
                 
-                # Detectar toque para LONG
                 if 'long' in self.shocks_activos.get(symbol, {}):
                     entrada_long = self.shocks_activos[symbol]['long']['entrada']
                     
-                    # Detectar cruce: precio bajó y tocó/cruzó la entrada
                     if precio_prev > entrada_long and precio_actual <= entrada_long:
                         print(f"🎯 TOQUE LONG detectado en {symbol} - Precio: {precio_actual}, Entrada: {entrada_long}")
                         self.actualizar_status(f"🎯 TOQUE LONG: {symbol}")
-                        # Recalcular order book para esta moneda
                         self.recalcular_shock_individual(symbol)
                 
-                # Detectar toque para SHORT
                 if 'short' in self.shocks_activos.get(symbol, {}):
                     entrada_short = self.shocks_activos[symbol]['short']['entrada']
                     
-                    # Detectar cruce: precio subió y tocó/cruzó la entrada
                     if precio_prev < entrada_short and precio_actual >= entrada_short:
                         print(f"🎯 TOQUE SHORT detectado en {symbol} - Precio: {precio_actual}, Entrada: {entrada_short}")
                         self.actualizar_status(f"🎯 TOQUE SHORT: {symbol}")
-                        # Recalcular order book para esta moneda
                         self.recalcular_shock_individual(symbol)
                 
                 self.precio_anterior[symbol] = precio_actual
                 
-                # Actualizar distancias en UI (solo para esta moneda)
                 self.root.after(0, lambda s=symbol: self.actualizar_distancia_moneda(s))
                 
             except Exception as e:
                 print(f"Error monitoreando {symbol}: {e}")
             
-            time.sleep(2)  # Monitorear cada 2 segundos
+            time.sleep(1)
         
         print(f"⏹️ Monitoreo detenido para {symbol}")
     
     def actualizar_distancia_moneda(self, symbol):
-        """Actualiza la distancia solo para una moneda específica y reordena si es necesario"""
+        """Actualiza la distancia y reordena si es necesario"""
         necesita_reordenar = False
         
         for key, tarjeta in list(self.tarjetas_activas.items()):
@@ -585,20 +547,14 @@ class ShockDashboard:
                         precio_actual = self.precios_actuales[symbol]
                         entrada = tarjeta['data']['entrada']
                         
-                        # Calcular nueva distancia a la entrada
                         distancia_pct = abs((entrada - precio_actual) / precio_actual * 100)
-                        
-                        # Guardar distancia anterior para detectar cambios significativos
                         distancia_anterior = tarjeta['data'].get('distancia_pct', distancia_pct)
                         
-                        # Actualizar data
                         tarjeta['data']['distancia_pct'] = distancia_pct
                         tarjeta['data']['precio_actual'] = precio_actual
                         
-                        # Actualizar label de distancia a entrada
                         tarjeta['dist_label'].config(text=f"{distancia_pct:.2f}%")
                         
-                        # Cambiar color según proximidad (entrada)
                         if distancia_pct < 0.5:
                             tarjeta['dist_label'].config(fg="#ff0000")
                         elif distancia_pct < 1.0:
@@ -608,26 +564,19 @@ class ShockDashboard:
                         else:
                             tarjeta['dist_label'].config(fg="#00ccff")
                         
-                        # Detectar si hay cambio significativo (más de 0.1% de diferencia)
                         if abs(distancia_pct - distancia_anterior) > 0.1:
                             necesita_reordenar = True
                 
                 except Exception as e:
                     pass
         
-        # Si hubo cambio significativo, reordenar dinámicamente
         if necesita_reordenar:
-            self.reordenar_tarjetas_dinamico()
+            self.reordenar_tarjetas_suave()
     
-    def reordenar_tarjetas_dinamico(self):
-        """Reordena las tarjetas de forma suave y sin parpadeos"""
-        if self.animando:
-            return
-        
-        self.animando = True
-        
+    def reordenar_tarjetas_suave(self):
+        """Reordena las tarjetas con animación suave de deslizamiento"""
         try:
-            # Separar longs y shorts con sus datos actualizados
+            # Construir nueva orden
             longs = []
             shorts = []
             
@@ -640,42 +589,52 @@ class ShockDashboard:
                 else:
                     shorts.append((distancia, key, tarjeta))
             
-            # Ordenar por distancia (menor a mayor)
-            longs_nuevos = sorted(longs, key=lambda x: x[0])
-            shorts_nuevos = sorted(shorts, key=lambda x: x[0])
+            longs_ordenados = sorted(longs, key=lambda x: x[0])
+            shorts_ordenados = sorted(shorts, key=lambda x: x[0])
             
-            # Reordenar LONGS de forma limpia
-            for idx, (dist, key, tarjeta) in enumerate(longs_nuevos):
-                tarjeta['frame'].pack_forget()
+            # Animar LONGS
+            y_offset = 0
+            for idx, (dist, key, tarjeta) in enumerate(longs_ordenados):
+                self.animar_tarjeta_a_posicion(tarjeta['frame'], y_offset)
+                y_offset += tarjeta['frame'].winfo_reqheight() + 16  # 16 = pady*2
             
-            for idx, (dist, key, tarjeta) in enumerate(longs_nuevos):
-                tarjeta['frame'].pack(fill=tk.X, padx=10, pady=8)
-            
-            # Reordenar SHORTS de forma limpia
-            for idx, (dist, key, tarjeta) in enumerate(shorts_nuevos):
-                tarjeta['frame'].pack_forget()
-            
-            for idx, (dist, key, tarjeta) in enumerate(shorts_nuevos):
-                tarjeta['frame'].pack(fill=tk.X, padx=10, pady=8)
-            
-            # Liberar flag después de un pequeño delay
-            self.root.after(200, self.liberar_animacion)
-        
+            # Animar SHORTS
+            y_offset = 0
+            for idx, (dist, key, tarjeta) in enumerate(shorts_ordenados):
+                self.animar_tarjeta_a_posicion(tarjeta['frame'], y_offset)
+                y_offset += tarjeta['frame'].winfo_reqheight() + 16
+                
         except Exception as e:
             print(f"Error reordenando tarjetas: {e}")
-            self.animando = False
     
-    def liberar_animacion(self):
-        """Libera el flag de animación"""
-        self.animando = False
+    def animar_tarjeta_a_posicion(self, frame, target_y, duracion=300, pasos=15):
+        """Anima un frame a una posición Y objetivo de forma suave"""
+        try:
+            # Si no está usando place(), convertir
+            if frame.winfo_manager() != 'place':
+                frame.pack_forget()
+                frame.place(x=10, y=0, relwidth=0.96)
+            
+            y_actual = frame.winfo_y()
+            diferencia = target_y - y_actual
+            paso_tiempo = duracion // pasos
+            paso_distancia = diferencia / pasos
+            
+            def animar(paso_actual=0):
+                if paso_actual <= pasos:
+                    nueva_y = y_actual + (paso_distancia * paso_actual)
+                    frame.place(x=10, y=int(nueva_y), relwidth=0.96)
+                    self.root.after(paso_tiempo, lambda: animar(paso_actual + 1))
+            
+            animar()
+        except Exception as e:
+            print(f"Error animando tarjeta: {e}")
     
     def recalcular_shock_individual(self, symbol):
-        """Recalcula el shock para una moneda específica cuando toca el precio de entrada"""
         def recalcular():
             print(f"📊 Recalculando order book para {symbol}...")
             
             try:
-                # Obtener order book solo para esta moneda
                 order_books = cargar_libro_ordenes_api([symbol], self.base_url)
                 
                 if symbol not in order_books:
@@ -690,7 +649,6 @@ class ShockDashboard:
                 shocks_long, shocks_short, decimales_tick = calcular_shocks(
                     order_book, agrupacion, tick)
                 
-                # Actualizar shocks activos
                 if len(shocks_long) >= 4:
                     nuevo_shock_long = shocks_long[2]
                     nuevo_stop_long = shocks_long[3]
@@ -713,7 +671,6 @@ class ShockDashboard:
                     
                     print(f"✅ {symbol} SHORT actualizado - Nueva entrada: {nuevo_shock_short}")
                 
-                # Reconstruir UI con datos actualizados
                 self.root.after(0, self.reconstruir_ui_desde_shocks)
                 
             except Exception as e:
@@ -783,7 +740,6 @@ class ShockDashboard:
     
     def actualizar_ui(self, longs, shorts):
         """Actualiza la interfaz con los resultados"""
-        # Limpiar contenedores y referencias
         for widget in self.long_container.winfo_children():
             widget.destroy()
         for widget in self.short_container.winfo_children():
@@ -791,13 +747,11 @@ class ShockDashboard:
         
         self.tarjetas_activas.clear()
         
-        # Actualizar stats
         total = len(longs) + len(shorts)
         self.lbl_total.config(text=f"Total: {total}")
         self.lbl_longs.config(text=f"Longs: {len(longs)}")
         self.lbl_shorts.config(text=f"Shorts: {len(shorts)}")
         
-        # Crear tarjetas
         for data in longs:
             self.crear_tarjeta_shock(self.long_container, data, "LONG")
         
