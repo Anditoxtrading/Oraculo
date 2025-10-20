@@ -73,26 +73,6 @@ def agrupar_precio_binance(price, agrupacion):
     agrupado = (price_decimal / agrupacion_decimal).quantize(Decimal('1'), rounding=ROUND_DOWN) * agrupacion_decimal
     return float(agrupado)
 
-# ---------- FUNCIONES DE ARCHIVO ----------
-
-RUTA_ARCHIVO = "agrupaciones.txt"
-
-def cargar_agrupaciones_guardadas():
-    if os.path.exists(RUTA_ARCHIVO):
-        try:
-            with open(RUTA_ARCHIVO, "r") as f:
-                return json.load(f)
-        except Exception as e:
-            pass
-    return {}
-
-def guardar_agrupaciones(agrupaciones):
-    try:
-        with open(RUTA_ARCHIVO, "w") as f:
-            json.dump(agrupaciones, f, indent=4)
-    except Exception as e:
-        pass
-
 # ---------- OBTENER DATOS BINANCE ----------
 
 def obtener_precio_actual(symbol):
@@ -189,69 +169,69 @@ class ShockDashboard:
         self.root.configure(bg="#0f0f1e")
         
         # Variables
-        self.agrupaciones = cargar_agrupaciones_guardadas()
+        self.agrupaciones = {}
         self.tick_sizes = {}
         self.base_url = "http://localhost:8000"
-        self.tarjetas_activas = {}  # {symbol_tipo: {widget, data}}
-        self.precios_actuales = {}  # Cache de precios
-        self.shocks_activos = {}    # {symbol: {long: {entrada, stop}, short: {entrada, stop}}}
+        self.tarjetas_activas = {}
+        self.precios_actuales = {}
+        self.shocks_activos = {}
         self.actualizando = True
-        self.precio_anterior = {}   # Para detectar cruces
-        self.hilos_monitores = {}   # {symbol: thread} - un hilo por moneda
-        self.animaciones_activas = {}  # {key: animation_id}
+        self.precio_anterior = {}
+        self.hilos_monitores = {}
+        self.animaciones_activas = {}
+        self.actualizaciones_pendientes = set()
+        self.ultimo_reorden = 0
         
         # Crear interfaz
         self.crear_interfaz()
         
         # Iniciar escaneo inicial
         self.escaneo_inicial()
+
+        # Iniciar procesador de actualizaciones agrupadas (60 FPS = ~16ms)
+        self.procesar_actualizaciones_agrupadas()
     
     def crear_interfaz(self):
-        # Header
-        header = tk.Frame(self.root, bg="#1a1a2e", height=100)
-        header.pack(fill=tk.X, padx=10, pady=10)
+        # Header compacto
+        header = tk.Frame(self.root, bg="#1a1a2e", height=40)
+        header.pack(fill=tk.X, padx=10, pady=(5, 5))
         
-        titulo = tk.Label(header, text="📊 ANÁLISIS DE SHOCKS", 
-                         font=("Segoe UI", 28, "bold"), 
-                         bg="#1a1a2e", fg="#00ff88")
-        titulo.pack(pady=10)
-        
-        # Stats
+        # Stats compactas en una sola línea
         stats_frame = tk.Frame(header, bg="#1a1a2e")
-        stats_frame.pack()
+        stats_frame.pack(pady=8)
         
         self.lbl_total = tk.Label(stats_frame, text="Total: 0", 
-                                  font=("Segoe UI", 12), 
+                                  font=("Segoe UI", 10), 
                                   bg="#1a1a2e", fg="#ffffff")
-        self.lbl_total.pack(side=tk.LEFT, padx=20)
+        self.lbl_total.pack(side=tk.LEFT, padx=15)
         
         self.lbl_longs = tk.Label(stats_frame, text="Longs: 0", 
-                                  font=("Segoe UI", 12), 
+                                  font=("Segoe UI", 10), 
                                   bg="#1a1a2e", fg="#00ff88")
-        self.lbl_longs.pack(side=tk.LEFT, padx=20)
+        self.lbl_longs.pack(side=tk.LEFT, padx=15)
         
         self.lbl_shorts = tk.Label(stats_frame, text="Shorts: 0", 
-                                   font=("Segoe UI", 12), 
+                                   font=("Segoe UI", 10), 
                                    bg="#1a1a2e", fg="#ff4444")
-        self.lbl_shorts.pack(side=tk.LEFT, padx=20)
+        self.lbl_shorts.pack(side=tk.LEFT, padx=15)
         
         self.lbl_status = tk.Label(stats_frame, text="🟢 Monitoreando", 
-                                   font=("Segoe UI", 11), 
+                                   font=("Segoe UI", 9), 
                                    bg="#1a1a2e", fg="#00ff88")
-        self.lbl_status.pack(side=tk.LEFT, padx=20)
+        self.lbl_status.pack(side=tk.LEFT, padx=15)
         
         # Contenedor de columnas
         columnas = tk.Frame(self.root, bg="#0f0f1e")
-        columnas.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        columnas.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
         # Columna LONG (Verde)
         long_frame = tk.Frame(columnas, bg="#0f0f1e")
         long_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
         
-        long_header = tk.Label(long_frame, text="🟢 LONG POSITIONS", 
-                               font=("Segoe UI", 18, "bold"),
+        long_header = tk.Label(long_frame, text="🟢 LONG", 
+                               font=("Segoe UI", 13, "bold"),
                                bg="#00cc66", fg="#ffffff", 
-                               pady=15)
+                               pady=8)
         long_header.pack(fill=tk.X)
         
         # Scroll para longs
@@ -262,8 +242,9 @@ class ShockDashboard:
         long_scrollbar = ttk.Scrollbar(long_scroll_frame, orient="vertical", command=self.long_canvas.yview)
         self.long_container = tk.Frame(self.long_canvas, bg="#1a1a2e")
         
-        self.long_container.bind("<Configure>", 
-                                lambda e: self.long_canvas.configure(scrollregion=self.long_canvas.bbox("all")))
+        # Optimizado: reduce llamadas al scrollregion
+        self.long_container.bind("<Configure>",
+                                lambda e: self.actualizar_scrollregion_debounced(self.long_canvas))
         
         self.long_canvas.create_window((0, 0), window=self.long_container, anchor="nw")
         self.long_canvas.configure(yscrollcommand=long_scrollbar.set)
@@ -275,10 +256,10 @@ class ShockDashboard:
         short_frame = tk.Frame(columnas, bg="#0f0f1e")
         short_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=5)
         
-        short_header = tk.Label(short_frame, text="🔴 SHORT POSITIONS", 
-                                font=("Segoe UI", 18, "bold"),
+        short_header = tk.Label(short_frame, text="🔴 SHORT", 
+                                font=("Segoe UI", 13, "bold"),
                                 bg="#cc0000", fg="#ffffff", 
-                                pady=15)
+                                pady=8)
         short_header.pack(fill=tk.X)
         
         # Scroll para shorts
@@ -289,8 +270,9 @@ class ShockDashboard:
         short_scrollbar = ttk.Scrollbar(short_scroll_frame, orient="vertical", command=self.short_canvas.yview)
         self.short_container = tk.Frame(self.short_canvas, bg="#1a1a2e")
         
-        self.short_container.bind("<Configure>", 
-                                 lambda e: self.short_canvas.configure(scrollregion=self.short_canvas.bbox("all")))
+        # Optimizado: reduce llamadas al scrollregion
+        self.short_container.bind("<Configure>",
+                                 lambda e: self.actualizar_scrollregion_debounced(self.short_canvas))
         
         self.short_canvas.create_window((0, 0), window=self.short_container, anchor="nw")
         self.short_canvas.configure(yscrollcommand=short_scrollbar.set)
@@ -302,68 +284,69 @@ class ShockDashboard:
         symbol = data['symbol']
         key = f"{symbol}_{tipo}"
         
-        card = tk.Frame(container, bg="#16213e", relief=tk.RAISED, bd=2)
-        card.pack(fill=tk.X, padx=10, pady=8)
+        card = tk.Frame(container, bg="#16213e", relief=tk.RAISED, bd=1)
+        card.pack(fill=tk.X, padx=8, pady=4)
         
         color = "#00ff88" if tipo == "LONG" else "#ff4444"
         
         info_frame = tk.Frame(card, bg="#16213e")
-        info_frame.pack(fill=tk.X, padx=20, pady=15)
+        info_frame.pack(fill=tk.X, padx=12, pady=8)
         
         formato = f".{data['decimales']}f"
         
         tk.Label(info_frame, text="Moneda:", 
-                font=("Segoe UI", 9, "bold"),
-                bg="#16213e", fg="#888888").pack(side=tk.LEFT, padx=(0, 5))
+                font=("Segoe UI", 8, "bold"),
+                bg="#16213e", fg="#888888").pack(side=tk.LEFT, padx=(0, 3))
         
         symbol_label = tk.Label(info_frame, text=symbol,
-                               font=("Segoe UI", 11, "bold"),
+                               font=("Segoe UI", 9, "bold"),
                                bg="#16213e", fg=color,
                                cursor="hand2")
-        symbol_label.pack(side=tk.LEFT, padx=(0, 20))
-        symbol_label.bind("<Button-1>", lambda e: self.copiar_al_portapapeles(symbol))
+        symbol_label.pack(side=tk.LEFT, padx=(0, 12))
+        # Optimizado: usar command pattern en vez de lambda para evitar closures
+        symbol_label.bind("<Button-1>", lambda e, t=symbol: self.copiar_al_portapapeles(t))
         
         tk.Label(info_frame, text="Shock:", 
-                font=("Segoe UI", 9, "bold"),
-                bg="#16213e", fg="#888888").pack(side=tk.LEFT, padx=(0, 5))
+                font=("Segoe UI", 8, "bold"),
+                bg="#16213e", fg="#888888").pack(side=tk.LEFT, padx=(0, 3))
         
         entrada_str = f"${data['entrada']:{formato}}"
         entrada_valor = f"{data['entrada']:{formato}}"
         entrada_label = tk.Label(info_frame, text=entrada_str,
-                                font=("Courier New", 10, "bold"),
+                                font=("Courier New", 9, "bold"),
                                 bg="#16213e", fg=color,
                                 cursor="hand2")
-        entrada_label.pack(side=tk.LEFT, padx=(0, 20))
-        entrada_label.bind("<Button-1>", lambda e: self.copiar_al_portapapeles(entrada_valor))
+        entrada_label.pack(side=tk.LEFT, padx=(0, 12))
+        entrada_label.bind("<Button-1>", lambda e, t=entrada_valor: self.copiar_al_portapapeles(t))
         
         tk.Label(info_frame, text="Stop:", 
-                font=("Segoe UI", 9, "bold"),
-                bg="#16213e", fg="#888888").pack(side=tk.LEFT, padx=(0, 5))
+                font=("Segoe UI", 8, "bold"),
+                bg="#16213e", fg="#888888").pack(side=tk.LEFT, padx=(0, 3))
         
         stop_str = f"${data['stop_loss']:{formato}}"
         stop_valor = f"{data['stop_loss']:{formato}}"
         stop_label = tk.Label(info_frame, text=stop_str,
-                             font=("Courier New", 10, "bold"),
+                             font=("Courier New", 9, "bold"),
                              bg="#16213e", fg="#ffa500",
                              cursor="hand2")
-        stop_label.pack(side=tk.LEFT, padx=(0, 5))
-        stop_label.bind("<Button-1>", lambda e: self.copiar_al_portapapeles(stop_valor))
+        stop_label.pack(side=tk.LEFT, padx=(0, 3))
+        stop_label.bind("<Button-1>", lambda e, t=stop_valor: self.copiar_al_portapapeles(t))
         
         entrada = data['entrada']
         stop_loss = data['stop_loss']
         distancia_entrada_stop_pct = abs((stop_loss - entrada) / entrada * 100)
         
         stop_dist_label = tk.Label(info_frame, text=f"{distancia_entrada_stop_pct:.2f}%",
-                                   font=("Courier New", 10, "bold"),
+                                   font=("Courier New", 9, "bold"),
                                    bg="#16213e", fg="#ff6b6b")
-        stop_dist_label.pack(side=tk.LEFT, padx=(0, 20))
+        stop_dist_label.pack(side=tk.LEFT, padx=(0, 12))
         
         tk.Label(info_frame, text="Dist:", 
-                font=("Segoe UI", 9, "bold"),
-                bg="#16213e", fg="#888888").pack(side=tk.LEFT, padx=(0, 5))
+                font=("Segoe UI", 8, "bold"),
+                bg="#16213e", fg="#888888").pack(side=tk.LEFT, padx=(0, 3))
         
         dist_label = tk.Label(info_frame, text=f"{data['distancia_pct']:.2f}%", 
-                             font=("Courier New", 10, "bold"),
+                             font=("Courier New", 9, "bold"),
                              bg="#16213e", fg="#00ccff")
         dist_label.pack(side=tk.LEFT)
         
@@ -376,6 +359,38 @@ class ShockDashboard:
         
         return card
     
+    def procesar_actualizaciones_agrupadas(self):
+        """Procesa todas las actualizaciones pendientes en un solo ciclo de UI"""
+        if not self.actualizando:
+            return
+
+        # Procesar todas las actualizaciones pendientes
+        if self.actualizaciones_pendientes:
+            symbols_a_actualizar = list(self.actualizaciones_pendientes)
+            self.actualizaciones_pendientes.clear()
+
+            for symbol in symbols_a_actualizar:
+                self.actualizar_distancia_moneda(symbol)
+
+        # Reprogramar para el próximo ciclo (60 FPS)
+        self.root.after(16, self.procesar_actualizaciones_agrupadas)
+
+    def actualizar_scrollregion_debounced(self, canvas):
+        """Actualiza el scrollregion con debouncing para evitar lag"""
+        if not hasattr(self, '_scroll_update_id'):
+            self._scroll_update_id = {}
+
+        canvas_id = str(canvas)
+
+        # Cancelar actualización pendiente
+        if canvas_id in self._scroll_update_id:
+            self.root.after_cancel(self._scroll_update_id[canvas_id])
+
+        # Programar nueva actualización después de 100ms
+        self._scroll_update_id[canvas_id] = self.root.after(
+            100, lambda: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
     def copiar_al_portapapeles(self, texto):
         self.root.clipboard_clear()
         self.root.clipboard_append(texto)
@@ -399,7 +414,6 @@ class ShockDashboard:
                     if precio:
                         agrupacion_optima = obtener_nivel_agrupacion_optimo(self.tick_sizes[sym], precio)
                         self.agrupaciones[sym] = agrupacion_optima
-                        guardar_agrupaciones(self.agrupaciones)
             
             order_books = cargar_libro_ordenes_api(symbols, self.base_url)
             if not order_books:
@@ -526,43 +540,45 @@ class ShockDashboard:
                         self.recalcular_shock_individual(symbol)
                 
                 self.precio_anterior[symbol] = precio_actual
-                
-                self.root.after(0, lambda s=symbol: self.actualizar_distancia_moneda(s))
-                
+
+                # OPTIMIZACIÓN: Agrupar actualizaciones pendientes en vez de llamar after() cada segundo
+                self.actualizaciones_pendientes.add(symbol)
+
             except Exception as e:
                 print(f"Error monitoreando {symbol}: {e}")
-            
+
             time.sleep(1)
         
         print(f"⏹️ Monitoreo detenido para {symbol}")
     
     def actualizar_distancia_moneda(self, symbol):
-        """Actualiza la distancia y reordena si es necesario"""
+        """Actualiza la distancia y reordena si es necesario - OPTIMIZADO"""
+        if symbol not in self.precios_actuales:
+            return
+        
+        precio_actual = self.precios_actuales[symbol]
         necesita_reordenar = False
+        cambios = False
         
         for key, tarjeta in list(self.tarjetas_activas.items()):
             if key.startswith(f"{symbol}_"):
                 try:
-                    if symbol in self.precios_actuales:
-                        precio_actual = self.precios_actuales[symbol]
-                        entrada = tarjeta['data']['entrada']
-                        
-                        distancia_pct = abs((entrada - precio_actual) / precio_actual * 100)
-                        distancia_anterior = tarjeta['data'].get('distancia_pct', distancia_pct)
-                        
+                    entrada = tarjeta['data']['entrada']
+                    distancia_pct = abs((entrada - precio_actual) / precio_actual * 100)
+                    distancia_anterior = tarjeta['data'].get('distancia_pct', distancia_pct)
+                    
+                    # Solo actualizar si hay cambio significativo (> 0.01%)
+                    if abs(distancia_pct - distancia_anterior) > 0.01:
                         tarjeta['data']['distancia_pct'] = distancia_pct
                         tarjeta['data']['precio_actual'] = precio_actual
-                        
                         tarjeta['dist_label'].config(text=f"{distancia_pct:.2f}%")
+                        cambios = True
                         
-                        if distancia_pct < 0.5:
-                            tarjeta['dist_label'].config(fg="#ff0000")
-                        elif distancia_pct < 1.0:
-                            tarjeta['dist_label'].config(fg="#ff8800")
-                        elif distancia_pct < 2.0:
-                            tarjeta['dist_label'].config(fg="#ffff00")
-                        else:
-                            tarjeta['dist_label'].config(fg="#00ccff")
+                        # Actualizar color solo si cambió de rango
+                        nuevo_color = self.obtener_color_distancia(distancia_pct)
+                        color_actual = tarjeta['dist_label'].cget('fg')
+                        if nuevo_color != color_actual:
+                            tarjeta['dist_label'].config(fg=nuevo_color)
                         
                         if abs(distancia_pct - distancia_anterior) > 0.1:
                             necesita_reordenar = True
@@ -570,66 +586,96 @@ class ShockDashboard:
                 except Exception as e:
                     pass
         
-        if necesita_reordenar:
+        if necesita_reordenar and cambios:
             self.reordenar_tarjetas_suave()
     
+    def obtener_color_distancia(self, distancia_pct):
+        """Retorna el color según la distancia - evita cálculos repetidos"""
+        if distancia_pct < 0.5:
+            return "#ff0000"
+        elif distancia_pct < 1.0:
+            return "#ff8800"
+        elif distancia_pct < 2.0:
+            return "#ffff00"
+        else:
+            return "#00ccff"
+    
     def reordenar_tarjetas_suave(self):
-        """Reordena las tarjetas con animación suave de deslizamiento"""
+        """Reordena las tarjetas con animación de deslizamiento OPTIMIZADA"""
         try:
+            # Throttling: solo reordenar cada 500ms como máximo
+            tiempo_actual = time.time()
+            if tiempo_actual - self.ultimo_reorden < 0.5:
+                return
+
+            self.ultimo_reorden = tiempo_actual
+
             # Construir nueva orden
             longs = []
             shorts = []
-            
+
             for key, tarjeta in self.tarjetas_activas.items():
                 tipo = tarjeta['data']['tipo']
                 distancia = tarjeta['data']['distancia_pct']
-                
+
                 if tipo == 'LONG':
                     longs.append((distancia, key, tarjeta))
                 else:
                     shorts.append((distancia, key, tarjeta))
-            
+
             longs_ordenados = sorted(longs, key=lambda x: x[0])
             shorts_ordenados = sorted(shorts, key=lambda x: x[0])
-            
-            # Animar LONGS
+
+            # Animar LONGS con deslizamiento
             y_offset = 0
             for idx, (dist, key, tarjeta) in enumerate(longs_ordenados):
                 self.animar_tarjeta_a_posicion(tarjeta['frame'], y_offset)
-                y_offset += tarjeta['frame'].winfo_reqheight() + 16  # 16 = pady*2
-            
-            # Animar SHORTS
+                y_offset += tarjeta['frame'].winfo_reqheight() + 8
+
+            # Animar SHORTS con deslizamiento
             y_offset = 0
             for idx, (dist, key, tarjeta) in enumerate(shorts_ordenados):
                 self.animar_tarjeta_a_posicion(tarjeta['frame'], y_offset)
-                y_offset += tarjeta['frame'].winfo_reqheight() + 16
-                
+                y_offset += tarjeta['frame'].winfo_reqheight() + 8
+
         except Exception as e:
             print(f"Error reordenando tarjetas: {e}")
     
-    def animar_tarjeta_a_posicion(self, frame, target_y, duracion=300, pasos=15):
-        """Anima un frame a una posición Y objetivo de forma suave"""
+    def animar_tarjeta_a_posicion(self, frame, target_y, duracion=200, pasos=8):
+        """Anima un frame a una posición Y objetivo - OPTIMIZADO"""
         try:
             # Si no está usando place(), convertir
             if frame.winfo_manager() != 'place':
                 frame.pack_forget()
                 frame.place(x=10, y=0, relwidth=0.96)
-            
+
             y_actual = frame.winfo_y()
             diferencia = target_y - y_actual
+
+            # Si la diferencia es muy pequeña, mover directamente
+            if abs(diferencia) < 5:
+                frame.place(x=10, y=int(target_y), relwidth=0.96)
+                return
+
             paso_tiempo = duracion // pasos
             paso_distancia = diferencia / pasos
-            
+
+            # Usar easing para suavizar el movimiento
             def animar(paso_actual=0):
                 if paso_actual <= pasos:
-                    nueva_y = y_actual + (paso_distancia * paso_actual)
+                    # Easing out cubic para movimiento más natural
+                    t = paso_actual / pasos
+                    easing = 1 - pow(1 - t, 3)
+                    nueva_y = y_actual + (diferencia * easing)
                     frame.place(x=10, y=int(nueva_y), relwidth=0.96)
-                    self.root.after(paso_tiempo, lambda: animar(paso_actual + 1))
-            
+
+                    if paso_actual < pasos:
+                        self.root.after(paso_tiempo, lambda: animar(paso_actual + 1))
+
             animar()
         except Exception as e:
-            print(f"Error animando tarjeta: {e}")
-    
+            pass  # Silenciar errores para evitar spam en consola
+
     def recalcular_shock_individual(self, symbol):
         def recalcular():
             print(f"📊 Recalculando order book para {symbol}...")
