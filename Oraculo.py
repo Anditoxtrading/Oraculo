@@ -8,6 +8,14 @@ from collections import defaultdict
 from decimal import Decimal, ROUND_DOWN
 import threading
 import time
+import websocket
+import sys
+import io
+
+# Configurar encoding UTF-8 para Windows
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # ---------- FUNCIONES UTILITARIAS ----------
 
@@ -75,12 +83,54 @@ def agrupar_precio_binance(price, agrupacion):
 
 # ---------- OBTENER DATOS BINANCE ----------
 
+# Diccionario global para almacenar precios en tiempo real desde WebSocket
+precios_websocket = {}
+precios_lock = threading.Lock()
+
 def obtener_precio_actual(symbol):
-    url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={symbol}"
-    try:
-        return float(requests.get(url, timeout=5).json()['price'])
-    except Exception as e:
-        return None
+    """Obtiene el precio desde el WebSocket en memoria (sin REST API)"""
+    with precios_lock:
+        return precios_websocket.get(symbol)
+
+def iniciar_websocket_precios(symbols):
+    """Inicia WebSocket combinado para obtener precios en tiempo real"""
+    def on_message_precio(ws, message):
+        try:
+            data = json.loads(message)
+            if 'stream' in data:
+                stream_data = data['data']
+                symbol = stream_data['s']  # Símbolo
+                precio = float(stream_data['c'])  # Close price (precio actual)
+
+                with precios_lock:
+                    precios_websocket[symbol] = precio
+        except Exception as e:
+            pass
+
+    def run_ws_precios():
+        while True:
+            try:
+                # Crear streams combinados para ticker: btcusdt@ticker/ethusdt@ticker/...
+                streams = '/'.join([f"{symbol.lower()}@ticker" for symbol in symbols])
+                url = f"wss://fstream.binance.com/stream?streams={streams}"
+
+                print(f"🔌 Conectando WebSocket de precios ({len(symbols)} símbolos)...")
+
+                ws = websocket.WebSocketApp(
+                    url,
+                    on_message=on_message_precio,
+                    on_error=lambda _, err: print(f"⚠️ Error WS precios: {err}"),
+                    on_close=lambda _, __, msg: print(f"❌ WS precios cerrado"),
+                )
+                ws.run_forever()
+            except Exception as e:
+                print(f"💥 Error en WS precios: {e}")
+
+            print("🔁 Reconectando WS precios en 5 segundos...")
+            time.sleep(5)
+
+    # Iniciar en hilo separado
+    threading.Thread(target=run_ws_precios, daemon=True).start()
 
 def obtener_tick_size(symbol):
     url = f"https://fapi.binance.com/fapi/v1/exchangeInfo"
@@ -400,13 +450,27 @@ class ShockDashboard:
         def escanear():
             print("🔍 Realizando escaneo inicial de order books...")
             self.actualizar_status("🔍 Escaneando...")
-            
+
             symbols = obtener_simbolos(self.base_url)
             if not symbols:
                 print("❌ No hay símbolos disponibles")
                 self.root.after(10000, self.escaneo_inicial)
                 return
-            
+
+            # Iniciar WebSocket de precios para todos los símbolos (UNA SOLA VEZ)
+            if not hasattr(self, 'ws_precios_iniciado'):
+                print(f"🚀 Iniciando WebSocket de precios para {len(symbols)} símbolos...")
+                iniciar_websocket_precios(symbols)
+                self.ws_precios_iniciado = True
+                # Esperar 5 segundos para que se conecte y reciba primeros precios
+                print("⏳ Esperando 5 segundos para recibir precios del WebSocket...")
+                time.sleep(5)
+
+                # Verificar cuántos precios se recibieron
+                with precios_lock:
+                    precios_recibidos = len(precios_websocket)
+                print(f"✅ Precios recibidos: {precios_recibidos}/{len(symbols)}")
+
             for sym in symbols:
                 if sym not in self.tick_sizes:
                     self.tick_sizes[sym] = obtener_tick_size(sym)
@@ -445,9 +509,9 @@ class ShockDashboard:
                 if symbol not in self.shocks_activos:
                     self.shocks_activos[symbol] = {}
                 
-                if len(shocks_long) >= 4:
-                    shock_1_long = shocks_long[2]
-                    shock_2_long = shocks_long[3]
+                if len(shocks_long) >= 6:
+                    shock_1_long = shocks_long[3]
+                    shock_2_long = shocks_long[4]
                     distancia_pct_long = abs((shock_1_long - precio_actual) / precio_actual * 100)
                     
                     self.shocks_activos[symbol]['long'] = {
@@ -467,9 +531,9 @@ class ShockDashboard:
                         'tick_size': tick
                     })
                 
-                if len(shocks_short) >= 4:
-                    shock_1_short = shocks_short[2]
-                    shock_2_short = shocks_short[3]
+                if len(shocks_short) >= 6:
+                    shock_1_short = shocks_short[3]
+                    shock_2_short = shocks_short[4]
                     distancia_pct_short = abs((shock_1_short - precio_actual) / precio_actual * 100)
                     
                     self.shocks_activos[symbol]['short'] = {
@@ -511,15 +575,16 @@ class ShockDashboard:
     
     def monitorear_moneda(self, symbol):
         print(f"▶️ Iniciando monitoreo de {symbol}")
-        
+
         while self.actualizando:
             try:
+                # Obtener precio del WebSocket (sin REST API)
                 precio_actual = obtener_precio_actual(symbol)
-                
+
                 if precio_actual is None:
                     time.sleep(0.5)
                     continue
-                
+
                 precio_prev = self.precio_anterior.get(symbol, precio_actual)
                 self.precios_actuales[symbol] = precio_actual
                 
