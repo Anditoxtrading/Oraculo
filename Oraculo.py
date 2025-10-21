@@ -126,8 +126,8 @@ def iniciar_websocket_precios(symbols):
             except Exception as e:
                 print(f"💥 Error en WS precios: {e}")
 
-            print("🔁 Reconectando WS precios en 5 segundos...")
-            time.sleep(5)
+            print("🔁 Reconectando WS precios en 10 segundos...")
+            time.sleep(10)
 
     # Iniciar en hilo separado
     threading.Thread(target=run_ws_precios, daemon=True).start()
