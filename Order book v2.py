@@ -9,6 +9,13 @@ from fastapi.responses import JSONResponse
 import uvicorn
 from binance.client import Client
 from collections import OrderedDict
+import sys
+import io
+
+# Configurar encoding UTF-8 para Windows
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # ===== CONFIGURACIÓN BINANCE =====
 api_key = ''
@@ -74,10 +81,10 @@ def process_buffer(symbol):
     with order_book_lock:
         book = order_books[symbol]
         lastUpdateId = book['lastUpdateId']
-        
+
         # Paso 4: Descartar eventos donde u < lastUpdateId
         book['buffer'] = [e for e in book['buffer'] if e['u'] >= lastUpdateId]
-        
+
         # Paso 5: El primer evento debe tener U <= lastUpdateId AND u >= lastUpdateId
         if not book['buffer']:
             # Buffer vacío es normal en monedas de bajo volumen
@@ -86,16 +93,16 @@ def process_buffer(symbol):
             book['last_u'] = lastUpdateId
             print(f"✅ Order book inicializado (esperando eventos): {symbol}")
             return True
-        
+
         first_event = book['buffer'][0]
         if not (first_event['U'] <= lastUpdateId <= first_event['u']):
             print(f"⚠️ Secuencia incorrecta para {symbol}. U={first_event['U']}, u={first_event['u']}, lastUpdateId={lastUpdateId}")
             return False
-        
+
         # Procesar todos los eventos del buffer
         for event in book['buffer']:
             apply_order_book_update(symbol, event)
-        
+
         book['buffer'] = []
         book['initialized'] = True
         print(f"✅ Order book inicializado correctamente: {symbol}")
@@ -104,7 +111,7 @@ def process_buffer(symbol):
 def apply_order_book_update(symbol, data):
     """Aplica una actualización al order book"""
     book = order_books[symbol]
-    
+
     # Actualizar bids
     for price, qty in data['b']:
         price_str = price
@@ -113,7 +120,7 @@ def apply_order_book_update(symbol, data):
             book['bids'].pop(price_str, None)
         else:
             book['bids'][price_str] = qty
-    
+
     # Actualizar asks
     for price, qty in data['a']:
         price_str = price
@@ -122,15 +129,27 @@ def apply_order_book_update(symbol, data):
             book['asks'].pop(price_str, None)
         else:
             book['asks'][price_str] = qty
-    
+
     # Actualizar last_u para verificación de continuidad
     book['last_u'] = data['u']
 
-def on_message(ws, message, symbol):
+def on_message_combined(ws, message):
+    """Maneja mensajes de streams combinados"""
     try:
-        data = json.loads(message)['data']
+        parsed = json.loads(message)
+
+        # Extraer símbolo del stream name: "btcusdt@depth@100ms" -> "BTCUSDT"
+        if 'stream' not in parsed:
+            return
+
+        stream_name = parsed['stream']
+        data = parsed['data']
+        symbol = stream_name.split('@')[0].upper()
 
         with order_book_lock:
+            if symbol not in order_books:
+                return
+
             book = order_books[symbol]
 
             # Si no está inicializado, agregar al buffer (optimizado: consolidar eventos)
@@ -140,7 +159,7 @@ def on_message(ws, message, symbol):
                 book['buffer'] = [e for e in book['buffer'] if not (e['u'] < data['U'])]
                 book['buffer'].append(data)
                 return
-            
+
             # Paso 6: Verificar continuidad (pu debe ser igual al u anterior)
             # Excepción: El primer evento después del snapshot puede tener pu < lastUpdateId
             if book['first_event_after_snapshot']:
@@ -173,9 +192,9 @@ def on_message(ws, message, symbol):
 
             # Aplicar la actualización
             apply_order_book_update(symbol, data)
-            
+
     except Exception as e:
-        print(f"💥 Error procesando mensaje para {symbol}: {e}")
+        print(f"💥 Error procesando mensaje: {e}")
 
 def reinitialize_symbol(symbol):
     """Reinicializa el order book de un símbolo"""
@@ -235,28 +254,48 @@ def initialize_order_book(symbol, retry_count=0):
         else:
             print(f"❌ Error crítico en {symbol} después de {max_retries} intentos: {e}")
 
-def start_websocket(symbol):
-    """Conexión WebSocket con reconexión automática"""
+def start_combined_websockets():
+    """Conexión WebSocket combinada para todos los símbolos (OPTIMIZADO)"""
+    # Agrupar símbolos en batches de 50 para evitar URLs muy largas
+    batch_size = 50
+    batches = [coins[i:i + batch_size] for i in range(0, len(coins), batch_size)]
+
+    for batch_idx, batch in enumerate(batches):
+        threading.Thread(
+            target=run_combined_websocket,
+            args=(batch, batch_idx),
+            daemon=True
+        ).start()
+        time.sleep(0.5)  # Pequeña pausa entre batches
+
+def run_combined_websocket(symbols_batch, batch_idx):
+    """Ejecuta un WebSocket combinado para un batch de símbolos"""
     while True:
         try:
-            print(f"🔌 Conectando WebSocket para {symbol}...")
+            # Crear el stream combinado: "btcusdt@depth@100ms/ethusdt@depth@100ms/..."
+            streams = '/'.join([f"{symbol.lower()}@depth@100ms" for symbol in symbols_batch])
+            url = f"wss://fstream.binance.com/stream?streams={streams}"
+
+            print(f"🔌 Conectando WebSocket combinado batch {batch_idx + 1} ({len(symbols_batch)} símbolos)...")
+
             ws = websocket.WebSocketApp(
-                f"wss://fstream.binance.com/stream?streams={symbol.lower()}@depth@100ms",
-                on_message=lambda _, msg: on_message(_, msg, symbol),
-                on_error=lambda _, err: print(f"⚠️ Error WS {symbol}: {err}"),
-                on_close=lambda _, __, msg: print(f"❌ WS cerrado {symbol}: {msg}"),
+                url,
+                on_message=lambda _, msg: on_message_combined(_, msg),
+                on_error=lambda _, err: print(f"⚠️ Error WS batch {batch_idx + 1}: {err}"),
+                on_close=lambda _, __, msg: print(f"❌ WS batch {batch_idx + 1} cerrado: {msg}"),
             )
-            ws.run_forever()
+            ws.run_forever(ping_interval=20, ping_timeout=10)
         except Exception as e:
-            print(f"💥 Error en WS {symbol}: {e}")
-        
-        # Marcar como no inicializado para reiniciar
+            print(f"💥 Error en WS batch {batch_idx + 1}: {e}")
+
+        # Marcar todos los símbolos del batch como no inicializados
         with order_book_lock:
-            order_books[symbol]['initialized'] = False
-            order_books[symbol]['buffer'] = []
-            order_books[symbol]['first_event_after_snapshot'] = True
-        
-        print(f"🔁 Reintentando conexión para {symbol} en 5 segundos...")
+            for symbol in symbols_batch:
+                order_books[symbol]['initialized'] = False
+                order_books[symbol]['buffer'] = []
+                order_books[symbol]['first_event_after_snapshot'] = True
+
+        print(f"🔁 Reintentando conexión batch {batch_idx + 1} en 5 segundos...")
         time.sleep(5)
 
 # ===== API LOCAL (FastAPI) =====
@@ -267,16 +306,16 @@ def get_orderbook(symbol: str):
     symbol = symbol.upper()
     if symbol not in order_books:
         return JSONResponse({"error": "Símbolo no monitoreado"}, status_code=404)
-    
+
     with order_book_lock:
         book = order_books[symbol]
         if not book['initialized']:
             return JSONResponse({"error": "Order book aún no inicializado"}, status_code=503)
-        
+
         # Convertir a diccionarios para compatibilidad con el bot de análisis
         bids_dict = {price: qty for price, qty in book['bids'].items()}
         asks_dict = {price: qty for price, qty in book['asks'].items()}
-        
+
         return JSONResponse({
             "symbol": symbol,
             "bids": bids_dict,
@@ -290,7 +329,7 @@ def get_symbols():
     with order_book_lock:
         initialized = [s for s, b in order_books.items() if b['initialized']]
         pending = [s for s, b in order_books.items() if not b['initialized']]
-    
+
     return {
         "symbols": list(order_books.keys()),
         "initialized": initialized,
@@ -299,27 +338,27 @@ def get_symbols():
 
 # ===== MAIN =====
 async def main():
-    # Iniciar WebSockets primero (paso 1)
-    for symbol in coins:
-        threading.Thread(target=start_websocket, args=(symbol,), daemon=True).start()
-    
+    # Iniciar WebSockets combinados (OPTIMIZADO: 1 conexión cada 50 símbolos)
+    print("🚀 Iniciando WebSockets combinados...")
+    start_combined_websockets()
+
     # Esperar para que empiecen a llegar eventos y se acumulen en el buffer
     print("⏳ Esperando acumulación de eventos...")
     await asyncio.sleep(5)
-    
+
     # Cargar snapshots e inicializar (pasos 2-5)
     for symbol in coins:
         threading.Thread(target=initialize_order_book, args=(symbol,), daemon=True).start()
         await asyncio.sleep(0.2)  # Escalonar las peticiones
-    
+
     # Iniciar la API en otro hilo independiente
     def start_api():
         uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
-    
+
     threading.Thread(target=start_api, daemon=True).start()
-    
+
     print("🚀 API de OrderBooks corriendo en http://localhost:8000")
-    
+
     # Mantener vivo el proceso principal
     while True:
         await asyncio.sleep(60)
