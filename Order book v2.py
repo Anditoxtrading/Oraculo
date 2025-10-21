@@ -256,8 +256,8 @@ def initialize_order_book(symbol, retry_count=0):
 
 def start_combined_websockets():
     """Conexión WebSocket combinada para todos los símbolos (OPTIMIZADO)"""
-    # Agrupar símbolos en batches de 50 para evitar URLs muy largas
-    batch_size = 50
+    # Agrupar símbolos en batches de 10 para mayor estabilidad
+    batch_size = 10
     batches = [coins[i:i + batch_size] for i in range(0, len(coins), batch_size)]
 
     for batch_idx, batch in enumerate(batches):
@@ -266,7 +266,7 @@ def start_combined_websockets():
             args=(batch, batch_idx),
             daemon=True
         ).start()
-        time.sleep(0.5)  # Pequeña pausa entre batches
+        time.sleep(1)  # Pausa entre batches para evitar sobrecarga
 
 def run_combined_websocket(symbols_batch, batch_idx):
     """Ejecuta un WebSocket combinado para un batch de símbolos"""
@@ -284,7 +284,8 @@ def run_combined_websocket(symbols_batch, batch_idx):
                 on_error=lambda _, err: print(f"⚠️ Error WS batch {batch_idx + 1}: {err}"),
                 on_close=lambda _, __, msg: print(f"❌ WS batch {batch_idx + 1} cerrado: {msg}"),
             )
-            ws.run_forever(ping_interval=20, ping_timeout=10)
+            # Sin ping/pong - Binance maneja keep-alive automáticamente
+            ws.run_forever()
         except Exception as e:
             print(f"💥 Error en WS batch {batch_idx + 1}: {e}")
 
