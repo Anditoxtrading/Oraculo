@@ -254,50 +254,71 @@ def initialize_order_book(symbol, retry_count=0):
         else:
             print(f"❌ Error crítico en {symbol} después de {max_retries} intentos: {e}")
 
-def start_combined_websockets():
-    """Conexión WebSocket combinada para todos los símbolos (OPTIMIZADO)"""
-    # Agrupar símbolos en batches de 10 para mayor estabilidad
-    batch_size = 10
-    batches = [coins[i:i + batch_size] for i in range(0, len(coins), batch_size)]
+def start_individual_websockets():
+    """Inicia WebSockets individuales para cada símbolo"""
+    print(f"🚀 Iniciando WebSockets individuales para {len(coins)} símbolos...")
 
-    for batch_idx, batch in enumerate(batches):
+    for symbol in coins:
         threading.Thread(
-            target=run_combined_websocket,
-            args=(batch, batch_idx),
+            target=run_individual_websocket,
+            args=(symbol,),
             daemon=True
         ).start()
-        time.sleep(1)  # Pausa entre batches para evitar sobrecarga
+        time.sleep(0.1)  # Pequeña pausa para evitar sobrecarga al inicio
 
-def run_combined_websocket(symbols_batch, batch_idx):
-    """Ejecuta un WebSocket combinado para un batch de símbolos"""
+def run_individual_websocket(symbol):
+    """Ejecuta un WebSocket individual para un símbolo específico"""
+    conexion_numero = 0
+
     while True:
+        conexion_numero += 1
         try:
-            # Crear el stream combinado: "btcusdt@depth@100ms/ethusdt@depth@100ms/..."
-            streams = '/'.join([f"{symbol.lower()}@depth@100ms" for symbol in symbols_batch])
-            url = f"wss://fstream.binance.com/stream?streams={streams}"
+            # Crear stream individual: "btcusdt@depth@100ms"
+            url = f"wss://fstream.binance.com/stream?streams={symbol.lower()}@depth@100ms"
 
-            print(f"🔌 Conectando WebSocket combinado batch {batch_idx + 1} ({len(symbols_batch)} símbolos)...")
+            if conexion_numero == 1:
+                print(f"🔌 [{symbol}] Iniciando WebSocket (conexión #{conexion_numero})...", flush=True)
+            else:
+                print(f"🔄 [{symbol}] Reconectando WebSocket (intento #{conexion_numero})...", flush=True)
+
+            def on_open_handler(_):
+                print(f"✅ [{symbol}] WebSocket conectado exitosamente", flush=True)
+
+            def on_error_handler(_, error):
+                print(f"⚠️ [{symbol}] Error WS: {error}", flush=True)
+
+            def on_close_handler(*args):
+                close_code = args[1] if len(args) > 1 else 'N/A'
+                print(f"❌ [{symbol}] WebSocket desconectado (código: {close_code})", flush=True)
 
             ws = websocket.WebSocketApp(
                 url,
+                on_open=on_open_handler,
                 on_message=lambda _, msg: on_message_combined(_, msg),
-                on_error=lambda _, err: print(f"⚠️ Error WS batch {batch_idx + 1}: {err}"),
-                on_close=lambda _, __, msg: print(f"❌ WS batch {batch_idx + 1} cerrado: {msg}"),
+                on_error=on_error_handler,
+                on_close=on_close_handler,
             )
             # Sin ping/pong - Binance maneja keep-alive automáticamente
             ws.run_forever()
         except Exception as e:
-            print(f"💥 Error en WS batch {batch_idx + 1}: {e}")
+            print(f"💥 [{symbol}] Excepción en WebSocket: {e}")
 
-        # Marcar todos los símbolos del batch como no inicializados
+        # Marcar el símbolo como no inicializado
         with order_book_lock:
-            for symbol in symbols_batch:
-                order_books[symbol]['initialized'] = False
-                order_books[symbol]['buffer'] = []
-                order_books[symbol]['first_event_after_snapshot'] = True
+            order_books[symbol]['initialized'] = False
+            order_books[symbol]['buffer'] = []
+            order_books[symbol]['first_event_after_snapshot'] = True
 
-        print(f"🔁 Reintentando conexión batch {batch_idx + 1} en 5 segundos...")
+        print(f"⏳ [{symbol}] Esperando 5 segundos antes de reconectar...", flush=True)
         time.sleep(5)
+
+        # Esperar a que el WebSocket se reconecte y acumule eventos
+        print(f"📡 [{symbol}] Acumulando eventos del buffer...", flush=True)
+        time.sleep(3)
+
+        # Reinicializar el símbolo después de reconectar
+        print(f"🔄 [{symbol}] Solicitando snapshot y reinicializando...", flush=True)
+        threading.Thread(target=initialize_order_book, args=(symbol,), daemon=True).start()
 
 # ===== API LOCAL (FastAPI) =====
 app = FastAPI()
@@ -339,9 +360,9 @@ def get_symbols():
 
 # ===== MAIN =====
 async def main():
-    # Iniciar WebSockets combinados (OPTIMIZADO: 1 conexión cada 50 símbolos)
-    print("🚀 Iniciando WebSockets combinados...")
-    start_combined_websockets()
+    # Iniciar WebSockets individuales (1 conexión por símbolo)
+    print("🚀 Iniciando WebSockets individuales...")
+    start_individual_websockets()
 
     # Esperar para que empiecen a llegar eventos y se acumulen en el buffer
     print("⏳ Esperando acumulación de eventos...")
@@ -360,13 +381,44 @@ async def main():
 
     print("🚀 API de OrderBooks corriendo en http://localhost:8000")
 
-    # Mantener vivo el proceso principal
+    # Mantener vivo el proceso principal y mostrar estado cada 60 segundos
     while True:
         await asyncio.sleep(60)
-        # Mostrar estado cada minuto
+
+        # Recopilar estadísticas detalladas
         with order_book_lock:
             initialized_count = sum(1 for b in order_books.values() if b['initialized'])
-        print(f"📊 Estado: {initialized_count}/{len(coins)} order books inicializados")
+            pending_count = len(coins) - initialized_count
+
+            # Contar símbolos con datos
+            symbols_con_datos = []
+            symbols_pendientes = []
+            for symbol, book in order_books.items():
+                if book['initialized']:
+                    symbols_con_datos.append(symbol)
+                else:
+                    symbols_pendientes.append(symbol)
+
+        # Mostrar resumen de estado claro
+        porcentaje = (initialized_count / len(coins) * 100) if len(coins) > 0 else 0
+
+        print("\n" + "="*80, flush=True)
+        print(f"📊 ESTADO DEL SISTEMA - {time.strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
+        print("="*80, flush=True)
+        print(f"✅ Order books inicializados: {initialized_count}/{len(coins)} ({porcentaje:.1f}%)", flush=True)
+        print(f"⏳ Pendientes de inicializar: {pending_count}", flush=True)
+
+        if initialized_count == len(coins):
+            print(f"🟢 SISTEMA OPERATIVO AL 100% - Todos los order books funcionando correctamente", flush=True)
+        elif initialized_count > 0:
+            print(f"🟡 SISTEMA PARCIALMENTE OPERATIVO", flush=True)
+            if pending_count <= 5 and pending_count > 0:
+                print(f"   Símbolos pendientes: {', '.join(symbols_pendientes)}", flush=True)
+        else:
+            print(f"🔴 SISTEMA NO OPERATIVO - Ningún order book inicializado", flush=True)
+
+        print(f"🌐 API REST: http://localhost:8000/orderbooks/{{symbol}}", flush=True)
+        print("="*80 + "\n", flush=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
