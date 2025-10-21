@@ -185,8 +185,8 @@ def calcular_shocks(order_book, agrupacion, tick_size):
 
     decimales_tick = obtener_decimales_de_tick(tick_size)
 
-    top_bids = sorted(bid_ranges.items(), key=lambda x: x[1]['total_qty'], reverse=True)[:6]
-    top_asks = sorted(ask_ranges.items(), key=lambda x: x[1]['total_qty'], reverse=True)[:6]
+    top_bids = sorted(bid_ranges.items(), key=lambda x: x[1]['total_qty'], reverse=True)[:8]
+    top_asks = sorted(ask_ranges.items(), key=lambda x: x[1]['total_qty'], reverse=True)[:8]
 
     shocks_long = []
     for pr_range, data in top_bids:
@@ -880,3 +880,4 @@ if __name__ == "__main__":
     app = ShockDashboard(root)
     root.protocol("WM_DELETE_WINDOW", app.cerrar)
     root.mainloop()
+
