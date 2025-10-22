@@ -509,7 +509,7 @@ class ShockDashboard:
                 if symbol not in self.shocks_activos:
                     self.shocks_activos[symbol] = {}
                 
-                if len(shocks_long) >= 6:
+                if len(shocks_long) >= 8:
                     shock_1_long = shocks_long[3]
                     shock_2_long = shocks_long[4]
                     distancia_pct_long = abs((shock_1_long - precio_actual) / precio_actual * 100)
@@ -531,7 +531,7 @@ class ShockDashboard:
                         'tick_size': tick
                     })
                 
-                if len(shocks_short) >= 6:
+                if len(shocks_short) >= 8:
                     shock_1_short = shocks_short[3]
                     shock_2_short = shocks_short[4]
                     distancia_pct_short = abs((shock_1_short - precio_actual) / precio_actual * 100)
@@ -880,4 +880,5 @@ if __name__ == "__main__":
     app = ShockDashboard(root)
     root.protocol("WM_DELETE_WINDOW", app.cerrar)
     root.mainloop()
+
 
