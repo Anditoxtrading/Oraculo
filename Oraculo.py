@@ -14,8 +14,8 @@ import io
 
 # Configurar encoding UTF-8 para Windows
 if sys.platform == 'win32':
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_buffering=True)
 
 # ---------- FUNCIONES UTILITARIAS ----------
 
@@ -147,22 +147,48 @@ def obtener_tick_size(symbol):
 
 def cargar_libro_ordenes_api(symbols, base_url="http://localhost:8000"):
     order_books = {}
-    for symbol in symbols:
+    print(f"📖 Cargando libros de órdenes para {len(symbols)} símbolos...")
+    sys.stdout.flush()
+
+    for idx, symbol in enumerate(symbols):
         try:
             resp = requests.get(f"{base_url}/orderbooks/{symbol}", timeout=5)
             if resp.status_code == 200:
                 order_books[symbol] = resp.json()
+                # Mostrar progreso cada 10 símbolos
+                if (idx + 1) % 10 == 0:
+                    print(f"   Cargados {idx + 1}/{len(symbols)} libros...")
+                    sys.stdout.flush()
         except Exception as e:
             pass
+
+    print(f"✅ Libros de órdenes cargados: {len(order_books)}/{len(symbols)}")
+    sys.stdout.flush()
     return order_books
 
 def obtener_simbolos(base_url="http://localhost:8000"):
     try:
+        print(f"📡 Conectando a API: {base_url}/symbols")
+        sys.stdout.flush()
         resp = requests.get(f"{base_url}/symbols", timeout=5)
         if resp.status_code == 200:
-            return resp.json().get("symbols", [])
+            symbols = resp.json().get("symbols", [])
+            print(f"✅ API respondió con {len(symbols)} símbolos")
+            sys.stdout.flush()
+            return symbols
+        else:
+            print(f"❌ API respondió con código: {resp.status_code}")
+            sys.stdout.flush()
+    except requests.exceptions.ConnectionError as e:
+        print(f"❌ ERROR: No se puede conectar a {base_url}")
+        print(f"   Asegúrate de que el servidor del libro de órdenes esté corriendo")
+        sys.stdout.flush()
+    except requests.exceptions.Timeout:
+        print(f"❌ ERROR: Timeout al conectar a {base_url}")
+        sys.stdout.flush()
     except Exception as e:
-        pass
+        print(f"❌ ERROR al obtener símbolos: {e}")
+        sys.stdout.flush()
     return []
 
 # ---------- ANÁLISIS DE SHOCKS ----------
@@ -447,29 +473,39 @@ class ShockDashboard:
         self.actualizar_status(f"📋 Copiado: {texto}")
     
     def escaneo_inicial(self):
+        """Inicia el escaneo en un thread NO daemon para evitar que se cierre prematuramente"""
         def escanear():
             print("🔍 Realizando escaneo inicial de order books...")
+            sys.stdout.flush()
             self.actualizar_status("🔍 Escaneando...")
 
             symbols = obtener_simbolos(self.base_url)
             if not symbols:
                 print("❌ No hay símbolos disponibles")
+                self.actualizar_status("❌ No hay símbolos - Reintentando en 10s")
+                sys.stdout.flush()
                 self.root.after(10000, self.escaneo_inicial)
                 return
+
+            print(f"✅ Símbolos obtenidos: {len(symbols)}")
+            sys.stdout.flush()
 
             # Iniciar WebSocket de precios para todos los símbolos (UNA SOLA VEZ)
             if not hasattr(self, 'ws_precios_iniciado'):
                 print(f"🚀 Iniciando WebSocket de precios para {len(symbols)} símbolos...")
+                sys.stdout.flush()
                 iniciar_websocket_precios(symbols)
                 self.ws_precios_iniciado = True
                 # Esperar 5 segundos para que se conecte y reciba primeros precios
                 print("⏳ Esperando 5 segundos para recibir precios del WebSocket...")
+                sys.stdout.flush()
                 time.sleep(5)
 
                 # Verificar cuántos precios se recibieron
                 with precios_lock:
                     precios_recibidos = len(precios_websocket)
                 print(f"✅ Precios recibidos: {precios_recibidos}/{len(symbols)}")
+                sys.stdout.flush()
 
             for sym in symbols:
                 if sym not in self.tick_sizes:
@@ -478,47 +514,58 @@ class ShockDashboard:
                     if precio:
                         agrupacion_optima = obtener_nivel_agrupacion_optimo(self.tick_sizes[sym], precio)
                         self.agrupaciones[sym] = agrupacion_optima
-            
+
             order_books = cargar_libro_ordenes_api(symbols, self.base_url)
             if not order_books:
                 print("❌ No hay datos de libros de órdenes")
+                self.actualizar_status("❌ No hay datos del libro - Reintentando en 10s")
+                sys.stdout.flush()
                 self.root.after(10000, self.escaneo_inicial)
                 return
-            
+
+            print(f"📖 Libros de órdenes cargados: {len(order_books)}")
+            sys.stdout.flush()
+
             resultados_long = []
             resultados_short = []
-            
+
+            simbolos_sin_precio = []
+            simbolos_sin_shocks = []
+
             for symbol in symbols:
                 if symbol not in order_books:
                     continue
-                
+
                 order_book = order_books[symbol]
                 agrupacion = self.agrupaciones[symbol]
                 tick = self.tick_sizes[symbol]
                 precio_actual = obtener_precio_actual(symbol)
-                
+
                 if precio_actual is None:
+                    simbolos_sin_precio.append(symbol)
                     continue
-                
+
                 self.precios_actuales[symbol] = precio_actual
                 self.precio_anterior[symbol] = precio_actual
-                
+
                 shocks_long, shocks_short, decimales_tick = calcular_shocks(
                     order_book, agrupacion, tick)
-                
+
                 if symbol not in self.shocks_activos:
                     self.shocks_activos[symbol] = {}
-                
+
+                # MEJORADO: Validación más flexible para shocks
+                # Usar índices 3 y 4 si hay suficientes shocks, sino usar lo que haya
                 if len(shocks_long) >= 5:
                     shock_1_long = shocks_long[3]
                     shock_2_long = shocks_long[4]
                     distancia_pct_long = abs((shock_1_long - precio_actual) / precio_actual * 100)
-                    
+
                     self.shocks_activos[symbol]['long'] = {
                         'entrada': shock_1_long,
                         'stop': shock_2_long
                     }
-                    
+
                     resultados_long.append({
                         'symbol': symbol,
                         'tipo': 'LONG',
@@ -530,17 +577,43 @@ class ShockDashboard:
                         'agrupacion': agrupacion,
                         'tick_size': tick
                     })
-                
+                elif len(shocks_long) >= 4:
+                    # Fallback: usar 2 shocks disponibles
+                    shock_1_long = shocks_long[2]
+                    shock_2_long = shocks_long[3]
+                    distancia_pct_long = abs((shock_1_long - precio_actual) / precio_actual * 100)
+
+                    self.shocks_activos[symbol]['long'] = {
+                        'entrada': shock_1_long,
+                        'stop': shock_2_long
+                    }
+
+                    resultados_long.append({
+                        'symbol': symbol,
+                        'tipo': 'LONG',
+                        'entrada': shock_1_long,
+                        'stop_loss': shock_2_long,
+                        'distancia_pct': distancia_pct_long,
+                        'precio_actual': precio_actual,
+                        'decimales': decimales_tick,
+                        'agrupacion': agrupacion,
+                        'tick_size': tick
+                    })
+                    print(f"⚠️ {symbol} LONG: Solo {len(shocks_long)} shocks (usando fallback)")
+                    sys.stdout.flush()
+                else:
+                    simbolos_sin_shocks.append(f"{symbol} (LONG: {len(shocks_long)} shocks)")
+
                 if len(shocks_short) >= 5:
                     shock_1_short = shocks_short[3]
                     shock_2_short = shocks_short[4]
                     distancia_pct_short = abs((shock_1_short - precio_actual) / precio_actual * 100)
-                    
+
                     self.shocks_activos[symbol]['short'] = {
                         'entrada': shock_1_short,
                         'stop': shock_2_short
                     }
-                    
+
                     resultados_short.append({
                         'symbol': symbol,
                         'tipo': 'SHORT',
@@ -552,26 +625,94 @@ class ShockDashboard:
                         'agrupacion': agrupacion,
                         'tick_size': tick
                     })
-            
+                elif len(shocks_short) >= 4:
+                    # Fallback: usar los primeros 2 shocks disponibles
+                    shock_1_short = shocks_short[2]
+                    shock_2_short = shocks_short[3]
+                    distancia_pct_short = abs((shock_1_short - precio_actual) / precio_actual * 100)
+
+                    self.shocks_activos[symbol]['short'] = {
+                        'entrada': shock_1_short,
+                        'stop': shock_2_short
+                    }
+
+                    resultados_short.append({
+                        'symbol': symbol,
+                        'tipo': 'SHORT',
+                        'entrada': shock_1_short,
+                        'stop_loss': shock_2_short,
+                        'distancia_pct': distancia_pct_short,
+                        'precio_actual': precio_actual,
+                        'decimales': decimales_tick,
+                        'agrupacion': agrupacion,
+                        'tick_size': tick
+                    })
+                    print(f"⚠️ {symbol} SHORT: Solo {len(shocks_short)} shocks (usando fallback)")
+                    sys.stdout.flush()
+                else:
+                    simbolos_sin_shocks.append(f"{symbol} (SHORT: {len(shocks_short)} shocks)")
+
             resultados_long.sort(key=lambda x: x['distancia_pct'])
             resultados_short.sort(key=lambda x: x['distancia_pct'])
-            
-            print(f"✅ Escaneo inicial completado: {len(resultados_long)} LONGs, {len(resultados_short)} SHORTs")
-            
-            self.root.after(0, lambda: self.actualizar_ui(resultados_long, resultados_short))
-            self.actualizar_status("🟢 Monitoreando")
-            
-            self.root.after(0, self.iniciar_hilos_monitores)
-        
-        threading.Thread(target=escanear, daemon=True).start()
+
+            # Reporte detallado de escaneo
+            print(f"\n{'='*60}")
+            print(f"✅ Escaneo inicial completado:")
+            print(f"   📊 Total símbolos: {len(symbols)}")
+            print(f"   📖 Libros cargados: {len(order_books)}")
+            print(f"   🟢 LONGs detectados: {len(resultados_long)}")
+            print(f"   🔴 SHORTs detectados: {len(resultados_short)}")
+
+            if simbolos_sin_precio:
+                print(f"   ⚠️ Símbolos sin precio WebSocket ({len(simbolos_sin_precio)}): {simbolos_sin_precio[:5]}")
+                if len(simbolos_sin_precio) > 5:
+                    print(f"      ... y {len(simbolos_sin_precio) - 5} más")
+
+            if simbolos_sin_shocks:
+                print(f"   ⚠️ Símbolos sin suficientes shocks ({len(simbolos_sin_shocks)}):")
+                for s in simbolos_sin_shocks[:5]:
+                    print(f"      - {s}")
+                if len(simbolos_sin_shocks) > 5:
+                    print(f"      ... y {len(simbolos_sin_shocks) - 5} más")
+
+            print(f"{'='*60}\n")
+            sys.stdout.flush()
+
+            # Actualizar status con información útil
+            if len(resultados_long) == 0 and len(resultados_short) == 0:
+                self.actualizar_status(f"⚠️ Sin shocks - Sin precio: {len(simbolos_sin_precio)}, Sin data: {len(simbolos_sin_shocks)}")
+            else:
+                self.actualizar_status("🟢 Monitoreando")
+
+            print(f"📊 Programando actualización de UI...")
+            sys.stdout.flush()
+
+            # Usar after con delay para asegurar que tkinter esté listo
+            self.root.after(100, lambda: self.actualizar_ui(resultados_long, resultados_short))
+
+            print(f"🔍 Programando inicio de monitores...")
+            sys.stdout.flush()
+
+            self.root.after(200, self.iniciar_hilos_monitores)
+
+        # IMPORTANTE: NO usar daemon=True para evitar que se cierre prematuramente
+        hilo_escaneo = threading.Thread(target=escanear, daemon=False)
+        hilo_escaneo.start()
     
     def iniciar_hilos_monitores(self):
+        print(f"\n🔄 Iniciando hilos de monitoreo para {len(self.shocks_activos)} símbolos...")
+        sys.stdout.flush()
+
         for symbol in self.shocks_activos.keys():
             if symbol not in self.hilos_monitores:
                 hilo = threading.Thread(target=self.monitorear_moneda, args=(symbol,), daemon=True)
                 hilo.start()
                 self.hilos_monitores[symbol] = hilo
                 print(f"🔍 Hilo de monitoreo iniciado para {symbol}")
+                sys.stdout.flush()
+
+        print(f"✅ Todos los hilos de monitoreo iniciados\n")
+        sys.stdout.flush()
     
     def monitorear_moneda(self, symbol):
         print(f"▶️ Iniciando monitoreo de {symbol}")
@@ -744,49 +885,79 @@ class ShockDashboard:
     def recalcular_shock_individual(self, symbol):
         def recalcular():
             print(f"📊 Recalculando order book para {symbol}...")
-            
+            sys.stdout.flush()
+
             try:
                 order_books = cargar_libro_ordenes_api([symbol], self.base_url)
-                
+
                 if symbol not in order_books:
                     print(f"❌ No se pudo obtener order book para {symbol}")
+                    sys.stdout.flush()
                     return
-                
+
                 order_book = order_books[symbol]
                 agrupacion = self.agrupaciones[symbol]
                 tick = self.tick_sizes[symbol]
                 precio_actual = self.precios_actuales[symbol]
-                
+
                 shocks_long, shocks_short, decimales_tick = calcular_shocks(
                     order_book, agrupacion, tick)
-                
-                if len(shocks_long) >= 4:
-                    nuevo_shock_long = shocks_long[2]
-                    nuevo_stop_long = shocks_long[3]
-                    
+
+                # ARREGLADO: Usar índices consistentes (3 y 4) igual que en escaneo inicial
+                if len(shocks_long) >= 5:
+                    nuevo_shock_long = shocks_long[3]
+                    nuevo_stop_long = shocks_long[4]
+
                     self.shocks_activos[symbol]['long'] = {
                         'entrada': nuevo_shock_long,
                         'stop': nuevo_stop_long
                     }
-                    
+
                     print(f"✅ {symbol} LONG actualizado - Nueva entrada: {nuevo_shock_long}")
-                
-                if len(shocks_short) >= 4:
-                    nuevo_shock_short = shocks_short[2]
-                    nuevo_stop_short = shocks_short[3]
-                    
+                    sys.stdout.flush()
+                elif len(shocks_long) >= 2:
+                    # Fallback: usar primeros 2 shocks
+                    nuevo_shock_long = shocks_long[0]
+                    nuevo_stop_long = shocks_long[1]
+
+                    self.shocks_activos[symbol]['long'] = {
+                        'entrada': nuevo_shock_long,
+                        'stop': nuevo_stop_long
+                    }
+
+                    print(f"⚠️ {symbol} LONG actualizado (fallback) - Nueva entrada: {nuevo_shock_long}")
+                    sys.stdout.flush()
+
+                if len(shocks_short) >= 5:
+                    nuevo_shock_short = shocks_short[3]
+                    nuevo_stop_short = shocks_short[4]
+
                     self.shocks_activos[symbol]['short'] = {
                         'entrada': nuevo_shock_short,
                         'stop': nuevo_stop_short
                     }
-                    
+
                     print(f"✅ {symbol} SHORT actualizado - Nueva entrada: {nuevo_shock_short}")
-                
+                    sys.stdout.flush()
+                elif len(shocks_short) >= 2:
+                    # Fallback: usar primeros 2 shocks
+                    nuevo_shock_short = shocks_short[0]
+                    nuevo_stop_short = shocks_short[1]
+
+                    self.shocks_activos[symbol]['short'] = {
+                        'entrada': nuevo_shock_short,
+                        'stop': nuevo_stop_short
+                    }
+
+                    print(f"⚠️ {symbol} SHORT actualizado (fallback) - Nueva entrada: {nuevo_shock_short}")
+                    sys.stdout.flush()
+
                 self.root.after(0, self.reconstruir_ui_desde_shocks)
-                
+
             except Exception as e:
                 print(f"Error recalculando shock para {symbol}: {e}")
-        
+                sys.stdout.flush()
+
         threading.Thread(target=recalcular, daemon=True).start()
     
     def reconstruir_ui_desde_shocks(self):
@@ -851,23 +1022,50 @@ class ShockDashboard:
     
     def actualizar_ui(self, longs, shorts):
         """Actualiza la interfaz con los resultados"""
+        print(f"\n🎨 Actualizando UI con {len(longs)} LONGs y {len(shorts)} SHORTs...")
+        sys.stdout.flush()
+
         for widget in self.long_container.winfo_children():
             widget.destroy()
         for widget in self.short_container.winfo_children():
             widget.destroy()
-        
+
         self.tarjetas_activas.clear()
-        
+
         total = len(longs) + len(shorts)
         self.lbl_total.config(text=f"Total: {total}")
         self.lbl_longs.config(text=f"Longs: {len(longs)}")
         self.lbl_shorts.config(text=f"Shorts: {len(shorts)}")
-        
-        for data in longs:
-            self.crear_tarjeta_shock(self.long_container, data, "LONG")
-        
-        for data in shorts:
-            self.crear_tarjeta_shock(self.short_container, data, "SHORT")
+
+        print(f"   Creando {len(longs)} tarjetas LONG...")
+        sys.stdout.flush()
+        for idx, data in enumerate(longs):
+            try:
+                self.crear_tarjeta_shock(self.long_container, data, "LONG")
+                if (idx + 1) % 10 == 0:
+                    print(f"      {idx + 1}/{len(longs)} tarjetas LONG creadas")
+                    sys.stdout.flush()
+            except Exception as e:
+                print(f"   ❌ Error creando tarjeta LONG {data.get('symbol', '?')}: {e}")
+                sys.stdout.flush()
+
+        print(f"   Creando {len(shorts)} tarjetas SHORT...")
+        sys.stdout.flush()
+        for idx, data in enumerate(shorts):
+            try:
+                self.crear_tarjeta_shock(self.short_container, data, "SHORT")
+                if (idx + 1) % 10 == 0:
+                    print(f"      {idx + 1}/{len(shorts)} tarjetas SHORT creadas")
+                    sys.stdout.flush()
+            except Exception as e:
+                print(f"   ❌ Error creando tarjeta SHORT {data.get('symbol', '?')}: {e}")
+                sys.stdout.flush()
+
+        print(f"✅ UI actualizada completamente\n")
+        sys.stdout.flush()
+
+        # Forzar actualización de la ventana
+        self.root.update_idletasks()
     
     def cerrar(self):
         """Cierra la aplicación correctamente"""
@@ -876,10 +1074,39 @@ class ShockDashboard:
 
 # ---------- EJECUTAR ----------
 if __name__ == "__main__":
+    print("\n" + "="*70)
+    print("🚀 INICIANDO BOT ORÁCULO SIMPLE - DETECTOR DE SHOCKS")
+    print("="*70)
+    print("⚙️  Configuración:")
+    print("   - API del libro de órdenes: http://localhost:8000")
+    print("   - WebSocket de precios: Binance Futures")
+    print("="*70 + "\n")
+    sys.stdout.flush()
+
     root = tk.Tk()
+    print("✅ Ventana de Tkinter creada")
+    sys.stdout.flush()
+
+    # Forzar que la ventana sea visible
+    root.update()
+    root.deiconify()
+    root.lift()
+    root.focus_force()
+
     app = ShockDashboard(root)
+    print("✅ Dashboard inicializado")
+    sys.stdout.flush()
+
     root.protocol("WM_DELETE_WINDOW", app.cerrar)
+    print("✅ Iniciando loop principal de Tkinter...")
+    print("📊 La ventana gráfica debería estar visible ahora")
+    print("="*70 + "\n")
+    sys.stdout.flush()
+
+    # Forzar actualización antes de mainloop
+    root.update_idletasks()
+    root.update()
+
     root.mainloop()
 
-
-
+    print("\n🛑 Mainloop terminado - Bot cerrado")
